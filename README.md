@@ -48,3 +48,53 @@ Confirm the project name is available on PyPI before the first release.
 ## License
 
 MIT; see `LICENSE`.
+
+## Battery chemistry interpretation (0.2.0)
+
+Protocol readings remain available as `BM2Reading`. Battery calculations live
+in `bmx_ble.battery` and have no NumPy or Home Assistant dependency:
+
+```python
+from bmx_ble.battery import get_battery_profile, interpret_reading
+
+profile = get_battery_profile("Lead-acid")
+raw_reading = await monitor.async_poll(ble_device)
+reading = interpret_reading(raw_reading, profile)
+print(reading.voltage, reading.percentage, reading.status)
+```
+
+`get_battery_profile()` accepts the existing chemistry labels and aliases.
+Profiles and their curves are immutable. `Automatic (via BM2)` preserves the
+monitor's reported percentage and status instead of applying a voltage curve.
+Unknown status codes produce `"unknown"` and do not imply charging. Status codes
+4 (charging) and 8 (floating) set the interpreted charging flag.
+
+Use `custom_battery_profile()` for a custom curve:
+
+```python
+from bmx_ble.battery import custom_battery_profile
+
+profile = custom_battery_profile(
+    battery_chemistry="My battery",
+    critical_voltage=11.0,
+    low_voltage=11.5,
+    fifty_percent_voltage=12.3,
+    hundred_percent_voltage=12.8,
+    floating_voltage=13.5,
+    charging_voltage=14.4,
+)
+```
+
+All six custom thresholds must be finite and strictly increasing; invalid
+profiles raise `BatteryConfigurationError`. The four discharge points map to
+0, 20, 50 and 100 percent. Linear interpolation clamps at the endpoints and
+truncates fractional percentages, matching the integration's previous behaviour.
+
+`interpret_reading()` returns `BatteryReading` with `battery_chemistry`,
+`voltage`, `percentage`, `status` and `charging`. Missing protocol values remain
+missing so consumers can preserve their last readings. In automatic mode,
+advertisement readings without a status do not invent one. For a configured
+curve, a reading with both voltage and percentage gets a calculated percentage
+and status. The input `BM2Reading` is not modified.
+
+The original protocol API is unchanged in this release.
