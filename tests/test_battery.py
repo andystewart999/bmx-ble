@@ -1,9 +1,10 @@
 """Battery models work without Home Assistant or NumPy."""
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from math import inf, nan
 
 import pytest
+
 from bmx_ble.battery import (
     BATTERY_PROFILES,
     Battery,
@@ -27,29 +28,9 @@ CUSTOM = {
 }
 
 
-@pytest.mark.parametrize(
-    ("option", "battery"),
-    [
-        ("Automatic (via BM2)", Battery.automatic),
-        ("Automatic", Battery.automatic),
-        ("AGM", Battery.agm),
-        ("Deep-cycle", Battery.deepcycle),
-        ("Lead-acid", Battery.leadacid),
-        ("LiFePO4", Battery.lifepo4),
-        ("LifePO4", Battery.lifepo4),
-        ("Lithium-ion", Battery.lithiumion),
-        ("iTechworld 120X (LiFePO4)", Battery.itech120x),
-        ("itech120x", Battery.itech120x),
-    ],
-)
-def test_chemistry_selection(option: str, battery: Battery) -> None:
-    """Current labels and historical aliases select the intended profile."""
-    assert get_battery_profile(option) is BATTERY_PROFILES[battery]
-
-
 def test_unknown_chemistry() -> None:
     """An unsupported label must not silently select another battery."""
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError, match="Unsupported"):
         get_battery_profile("Unsupported")
 
 
@@ -83,7 +64,8 @@ def test_predefined_curve(battery: Battery, midpoint: float) -> None:
 def test_percentage_interpolation(voltage: float, expected: int) -> None:
     """Interpolate linearly, truncate fractional results and clamp endpoints."""
     assert (
-        percentage_from_voltage(get_battery_profile("Lead-acid"), voltage) == expected
+        percentage_from_voltage(get_battery_profile(Battery.leadacid), voltage)
+        == expected
     )
 
 
@@ -93,7 +75,9 @@ def test_percentage_interpolation(voltage: float, expected: int) -> None:
 )
 def test_status_thresholds(voltage: float, expected: int) -> None:
     """Charging, floating, critical and low thresholds include their boundary."""
-    assert status_from_voltage(get_battery_profile("Lead-acid"), voltage) == expected
+    assert (
+        status_from_voltage(get_battery_profile(Battery.leadacid), voltage) == expected
+    )
 
 
 def test_custom_profile() -> None:
@@ -129,7 +113,7 @@ def test_invalid_custom_thresholds(field: str, value: float) -> None:
 
 def test_profiles_are_immutable() -> None:
     """Consumers cannot modify a shared chemistry profile or its curve."""
-    profile = get_battery_profile("AGM")
+    profile = get_battery_profile(Battery.agm)
     with pytest.raises(FrozenInstanceError):
         profile.low_voltage = 99
     with pytest.raises(TypeError):
@@ -154,7 +138,7 @@ def test_automatic_reading(
 ) -> None:
     """Automatic mode retains the monitor percentage and recognizes known codes."""
     raw = BM2Reading(12.5, 67, code, "active")
-    interpreted = interpret_reading(raw, get_battery_profile("Automatic (via BM2)"))
+    interpreted = interpret_reading(raw, get_battery_profile(Battery.automatic))
     assert interpreted.battery_chemistry == "Automatic"
     assert interpreted.voltage == 12.5
     assert interpreted.percentage == 67
@@ -164,8 +148,8 @@ def test_automatic_reading(
     assert raw.status == code
 
 
-@pytest.mark.parametrize("chemistry", ["Automatic", "Lead-acid"])
-def test_partial_reading(chemistry: str) -> None:
+@pytest.mark.parametrize("chemistry", [Battery.automatic, Battery.leadacid])
+def test_partial_reading(chemistry: Battery) -> None:
     """Legacy percentage-only packets keep voltage and status missing."""
     result = interpret_reading(
         BM2Reading(None, 45, None, "advertisement"), get_battery_profile(chemistry)
@@ -179,7 +163,8 @@ def test_partial_reading(chemistry: str) -> None:
 def test_voltage_without_percentage_preserves_partial_reading() -> None:
     """Keep the existing behaviour when a reading lacks percentage."""
     result = interpret_reading(
-        BM2Reading(12.5, None, None, "advertisement"), get_battery_profile("Lead-acid")
+        BM2Reading(12.5, None, None, "advertisement"),
+        get_battery_profile(Battery.leadacid),
     )
     assert result.voltage == 12.5
     assert result.percentage is None
@@ -189,7 +174,8 @@ def test_voltage_without_percentage_preserves_partial_reading() -> None:
 def test_chemistry_interpretation() -> None:
     """A selected chemistry replaces raw percentage and fills missing status."""
     result = interpret_reading(
-        BM2Reading(12.06, 99, None, "advertisement"), get_battery_profile("Lead-acid")
+        BM2Reading(12.06, 99, None, "advertisement"),
+        get_battery_profile(Battery.leadacid),
     )
     assert result.percentage == 50
     assert result.status == "critical"
@@ -207,7 +193,7 @@ def test_custom_name_does_not_enable_automatic_mode() -> None:
 @pytest.mark.parametrize("voltage", [nan, inf, -inf])
 def test_invalid_voltage(voltage: float) -> None:
     """Calculations reject non-finite voltage instead of inventing a status."""
-    profile = get_battery_profile("Lead-acid")
+    profile = get_battery_profile(Battery.leadacid)
     with pytest.raises(ValueError, match="finite"):
         percentage_from_voltage(profile, voltage)
     with pytest.raises(ValueError, match="finite"):
@@ -217,4 +203,38 @@ def test_invalid_voltage(voltage: float) -> None:
 def test_automatic_profile_has_no_percentage_curve() -> None:
     """Automatic mode requires the monitor percentage, not interpolation."""
     with pytest.raises(BatteryConfigurationError, match="curve"):
-        percentage_from_voltage(get_battery_profile("Automatic"), 12.5)
+        percentage_from_voltage(get_battery_profile(Battery.automatic), 12.5)
+
+
+@pytest.mark.parametrize("battery", list(BATTERY_PROFILES))
+@pytest.mark.parametrize("as_string", [False, True])
+def test_stable_battery_identifiers(battery: Battery, as_string: bool) -> None:
+    """Enum members and persisted identifiers resolve to the same profile."""
+    option = battery.value if as_string else battery
+    assert get_battery_profile(option) is BATTERY_PROFILES[battery]
+
+
+@pytest.mark.parametrize("option", [Battery.custom, "custom"])
+def test_custom_identifier(option: Battery | str) -> None:
+    """Custom selection is normalized but requires explicit voltage thresholds."""
+    with pytest.raises(KeyError):
+        get_battery_profile(option)
+
+
+@pytest.mark.parametrize("label", ["Automatic (via BM2)", "AGM", "Lead-acid", "Custom"])
+def test_display_labels_are_not_identifiers(label: str) -> None:
+    """Human-readable labels cannot become persisted battery identifiers."""
+    with pytest.raises(ValueError, match="is not a valid Battery"):
+        get_battery_profile(label)
+
+
+def test_display_label_does_not_change_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Renaming a profile's display label leaves its persisted key valid."""
+    from bmx_ble import battery as battery_module
+
+    profile = replace(
+        BATTERY_PROFILES[Battery.leadacid], battery_chemistry="Renamed chemistry"
+    )
+    monkeypatch.setattr(battery_module, "BATTERY_PROFILES", {Battery.leadacid: profile})
+    assert get_battery_profile("leadacid") is profile
+    assert get_battery_profile(Battery.leadacid) is profile

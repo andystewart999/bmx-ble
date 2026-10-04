@@ -115,21 +115,6 @@ BATTERY_PROFILES: Mapping[Battery, BatteryProfile] = MappingProxyType(
     }
 )
 
-_CHEMISTRY_OPTIONS: Mapping[str, Battery] = MappingProxyType(
-    {
-        "Automatic": Battery.automatic,
-        "Automatic (via BM2)": Battery.automatic,
-        "AGM": Battery.agm,
-        "Deep-cycle": Battery.deepcycle,
-        "Lead-acid": Battery.leadacid,
-        "LiFePO4": Battery.lifepo4,
-        "LifePO4": Battery.lifepo4,
-        "Lithium-ion": Battery.lithiumion,
-        "iTechworld 120X (LiFePO4)": Battery.itech120x,
-        "itech120x": Battery.itech120x,
-    }
-)
-
 _STATUS_NAMES: Mapping[int, str] = MappingProxyType(
     {
         0: "critical",
@@ -141,9 +126,12 @@ _STATUS_NAMES: Mapping[int, str] = MappingProxyType(
 )
 
 
-def get_battery_profile(chemistry: str) -> BatteryProfile:
-    """Return a predefined profile, accepting existing chemistry labels."""
-    return BATTERY_PROFILES[_CHEMISTRY_OPTIONS[chemistry]]
+def get_battery_profile(chemistry: Battery | str) -> BatteryProfile:
+    """Return a predefined profile by stable identifier or enum.
+
+    Custom batteries require thresholds supplied to custom_battery_profile().
+    """
+    return BATTERY_PROFILES[Battery(chemistry)]
 
 
 def custom_battery_profile(

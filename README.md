@@ -55,15 +55,19 @@ Protocol readings remain available as `BM2Reading`. Battery calculations live
 in `bmx_ble.battery` and have no NumPy or Home Assistant dependency:
 
 ```python
-from bmx_ble.battery import get_battery_profile, interpret_reading
+from bmx_ble.battery import Battery, get_battery_profile, interpret_reading
 
-profile = get_battery_profile("Lead-acid")
+profile = get_battery_profile(Battery.leadacid)
 raw_reading = await monitor.async_poll(ble_device)
 reading = interpret_reading(raw_reading, profile)
 print(reading.voltage, reading.percentage, reading.status)
 ```
 
-`get_battery_profile()` accepts the existing chemistry labels and aliases.
+From 0.3.0, `get_battery_profile()` accepts `Battery` enum members and their stable
+string values, such as `"automatic"`, `"leadacid"` and `"lifepo4"`. Store these
+identifiers in configuration; display labels can change independently. Labels
+such as `"Lead-acid"` are not accepted as identifiers. Custom batteries use
+`custom_battery_profile()` and explicit thresholds.
 Profiles and their curves are immutable. `Automatic (via BM2)` preserves the
 monitor's reported percentage and status instead of applying a voltage curve.
 Unknown status codes produce `"unknown"` and do not imply charging. Status codes
