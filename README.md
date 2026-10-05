@@ -59,10 +59,10 @@ Confirm the project name is available on PyPI before the first release.
 
 MIT; see `LICENSE`.
 
-## Battery chemistry interpretation (0.2.0)
+## Battery chemistry interpretation
 
 Protocol readings remain available as `BM2Reading`. Battery calculations live
-in `bmx_ble.battery` and have no NumPy or Home Assistant dependency:
+in `bmx_ble.battery` and have no NumPy dependency:
 
 ```python
 from bmx_ble.battery import Battery, get_battery_profile, interpret_reading
@@ -73,13 +73,14 @@ reading = interpret_reading(raw_reading, profile)
 print(reading.voltage, reading.percentage, reading.status)
 ```
 
-From 0.3.0, `get_battery_profile()` accepts `Battery` enum members and their stable
+`get_battery_profile()` accepts `Battery` enum members and their stable
 string values, such as `"automatic"`, `"leadacid"` and `"lifepo4"`. Store these
-identifiers in configuration; display labels can change independently. Labels
+identifiers in configuration as display labels can change independently and labels
 such as `"Lead-acid"` are not accepted as identifiers. Custom batteries use
-`custom_battery_profile()` and explicit thresholds.
+`custom_battery_profile()` and explicit thresholds that you define.
+
 Profiles and their curves are immutable. `Automatic (via BM2)` preserves the
-monitor's reported percentage and status instead of applying a voltage curve.
+battery monitor's reported percentage and status instead of applying a voltage curve.
 Unknown status codes produce `"unknown"` and do not imply charging. Status codes
 4 (charging) and 8 (floating) set the interpreted charging flag.
 
@@ -110,5 +111,3 @@ missing so consumers can preserve their last readings. In automatic mode,
 advertisement readings without a status do not invent one. For a configured
 curve, a reading with both voltage and percentage gets a calculated percentage
 and status. The input `BM2Reading` is not modified.
-
-The original protocol API is unchanged in this release.
