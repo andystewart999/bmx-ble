@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1
+## 0.3.2
 
 - Decode current raw manufacturer advertisements instead of merged scanner history.
 - Reject ambiguous manufacturer dictionaries when raw bytes are unavailable.
