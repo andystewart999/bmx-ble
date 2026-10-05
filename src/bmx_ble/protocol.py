@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
+from time import monotonic
 
 from bleak import BleakError, BLEDevice
 from bleak_retry_connector import (
@@ -17,6 +18,7 @@ from Crypto.Cipher import AES
 
 _LOGGER = logging.getLogger(__name__)
 GATT_TIMEOUT = 20
+ADVERTISEMENT_MAX_AGE = 180
 BM2_CHARACTERISTIC = "{0000fff4-0000-1000-8000-00805f9b34fb}"
 VALID_BATTERY_STATUSES = frozenset({0, 1, 2, 4, 8})
 
@@ -77,6 +79,7 @@ class BM2Protocol:
         self._gattdata: bytes | None = None
         self._ignore_advertisement = False
         self._advertisement_reading: BM2Reading | None = None
+        self._advertisement_time: float | None = None
         self._bm2_generation = BM2Generation.UNKNOWN
 
     @property
@@ -89,47 +92,49 @@ class BM2Protocol:
         """Return whether an active notification read is in progress."""
         return self._ignore_advertisement
 
-    def process_advertisement(self, manufacturer_data: dict[int, bytes]) -> None:
-        """Cache recognised advertisements, retaining enhanced voltage when possible."""
+    def process_advertisement(
+        self, manufacturer_data: dict[int, bytes], *, raw: bytes | None = None
+    ) -> None:
+        """Cache telemetry from the current packet, not merged scanner history."""
+        if raw is not None:
+            manufacturer_data = self._raw_manufacturer_data(raw)
+        elif len(manufacturer_data) > 1:
+            # Without raw bytes the merged records have no reliable chronology.
+            self._advertisement_reading = None
+            self._advertisement_time = None
+            return
+
         reading = self._decode_advertisement(manufacturer_data)
-        if reading is not None:
-            # CONFIG FLOW / GENERATION:
-            # Enhanced BM2s can emit BOTH the old iBeacon-style percentage
-            # packet and the newer encrypted voltage+percentage packet.
-            #
-            # Once Enhanced has been positively observed, never downgrade the
-            # device back to Legacy merely because the next advertisement was
-            # the old-format packet.
-            if reading.generation is BM2Generation.ENHANCED:
-                self._bm2_generation = BM2Generation.ENHANCED
-                self._advertisement_reading = reading
+        if reading is None:
+            return
+        if reading.generation is BM2Generation.ENHANCED:
+            self._bm2_generation = BM2Generation.ENHANCED
+        elif self._bm2_generation is BM2Generation.UNKNOWN:
+            self._bm2_generation = reading.generation
+        # A fresh percentage-only packet must not refresh an older voltage.
+        self._advertisement_reading = reading
+        self._advertisement_time = monotonic()
 
-            elif (
-                reading.generation is BM2Generation.LEGACY
-                and self._bm2_generation is BM2Generation.ENHANCED
-                and self._advertisement_reading is not None
-            ):
-                # Preserve the most recently known enhanced voltage while
-                # accepting the fresher percentage from the legacy packet.
-                self._advertisement_reading = BM2Reading(
-                    voltage=self._advertisement_reading.voltage,
-                    percentage=reading.percentage,
-                    status=None,
-                    source="advertisement",
-                    generation=BM2Generation.ENHANCED,
-                )
-
-            else:
-                self._bm2_generation = reading.generation
-                self._advertisement_reading = reading
-
-            _LOGGER.debug(
-                "Cached BM2 advertisement reading: generation=%s, "
-                "voltage=%s, percentage=%s",
-                self._bm2_generation,
-                self._advertisement_reading.voltage,
-                self._advertisement_reading.percentage,
-            )
+    @staticmethod
+    def _raw_manufacturer_data(raw: bytes) -> dict[int, bytes]:
+        """Extract manufacturer records from length-prefixed Bluetooth AD fields."""
+        records: dict[int, bytes] = {}
+        offset = 0
+        while offset < len(raw):
+            length = raw[offset]
+            if length == 0:
+                break
+            end = offset + length + 1
+            if end > len(raw):
+                return {}
+            if raw[offset + 1] == 0xFF and length >= 3:
+                manufacturer_id = int.from_bytes(raw[offset + 2 : offset + 4], "little")
+                # Multiple records with the same ID cannot be represented safely.
+                if manufacturer_id in records:
+                    return {}
+                records[manufacturer_id] = raw[offset + 4 : end]
+            offset = end
+        return records
 
     @staticmethod
     def _decrypt(data: bytes) -> bytes:
@@ -387,7 +392,11 @@ class BM2Protocol:
             # ADVERTISEMENT FALLBACK:
             # Active connection/read failed.  If the immediately preceding
             # advertisement contained usable telemetry, publish it instead.
-            if self._advertisement_reading is not None:
+            if (
+                self._advertisement_reading is not None
+                and self._advertisement_time is not None
+                and monotonic() - self._advertisement_time <= ADVERTISEMENT_MAX_AGE
+            ):
                 address = ble_device.address if ble_device is not None else "unknown"
                 _LOGGER.debug(
                     "Active BM2 read failed for %s (%s); using cached "

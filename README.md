@@ -20,13 +20,23 @@ python -m pip install bmx-ble
 from bmx_ble import BM2Protocol
 
 monitor = BM2Protocol()
-monitor.process_advertisement(service_info.manufacturer_data)
+monitor.process_advertisement(
+    service_info.manufacturer_data, raw=service_info.raw
+)
 reading = await monitor.async_poll(ble_device)  # None allows passive fallback.
 print(reading.voltage, reading.percentage, reading.generation)
 ```
 
 Supply a `bleak.backends.device.BLEDevice` for active reading. Connection
 failures propagate when no usable advertisement has been cached.
+
+Pass the current raw Bluetooth advertisement when available: scanner manufacturer
+data may contain records accumulated across many packets. Raw fields are parsed
+by their Bluetooth AD lengths, and only current manufacturer records are decoded.
+Without raw bytes, dictionaries with multiple records are ambiguous and are not
+used as passive telemetry. Cached passive readings expire after 180 seconds.
+A fresh legacy percentage packet does not renew a historical voltage reading;
+the previously detected Enhanced generation remains known.
 
 ## Development
 
