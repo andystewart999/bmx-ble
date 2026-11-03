@@ -299,7 +299,8 @@ class BM2Protocol:
 
             False:
                 The device is positively incompatible (for example FFF4 is
-                absent, or a notification decrypts to implausible BM2 data).
+                absent, a notification is not one 16-byte AES block, or it
+                decrypts to implausible BM2 data).
 
         Connection errors and notification timeouts deliberately propagate.
         The config flow treats those as "could not validate" rather than
@@ -330,7 +331,15 @@ class BM2Protocol:
                 )
                 return False
 
-            reading = await self._get_payload(client)
+            try:
+                reading = await self._get_payload(client)
+            except ValueError as ex:
+                _LOGGER.debug(
+                    "BM2 validation failed for %s: malformed notification (%s)",
+                    ble_device.address,
+                    ex,
+                )
+                return False
 
             if reading.voltage is None or reading.percentage is None:
                 return False

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4
+
+- Reject malformed FFF4 notifications during active validation instead of raising `ValueError`.
+
+## 0.3.3
+
+- Declare `bluetooth-sensor-state-data` and `sensor-state-data` as runtime dependencies.
+
 ## 0.3.2
 
 - Decode current raw manufacturer advertisements instead of merged scanner history.
