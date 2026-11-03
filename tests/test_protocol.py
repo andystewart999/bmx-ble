@@ -117,6 +117,40 @@ async def test_active_validation_rejects_missing_characteristic() -> None:
     client.disconnect.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "notification",
+    [
+        pytest.param(b"", id="empty"),
+        pytest.param(bytes(15), id="short"),
+        pytest.param(bytes(17), id="long"),
+        pytest.param(bytes(32), id="two_blocks"),
+    ],
+)
+async def test_active_validation_rejects_malformed_notification(
+    notification: bytes,
+) -> None:
+    """A notification that is not one AES block is a protocol rejection."""
+    client = SimpleNamespace(
+        address="AA:BB:CC:DD:EE:FF",
+        services=[
+            SimpleNamespace(characteristics=[SimpleNamespace(uuid=BM2_CHARACTERISTIC)])
+        ],
+        start_notify=AsyncMock(
+            side_effect=lambda _uuid, callback: callback(0, bytearray(notification))
+        ),
+        stop_notify=AsyncMock(),
+        disconnect=AsyncMock(),
+    )
+    device = SimpleNamespace(address=client.address)
+    with patch(
+        "bmx_ble.protocol.establish_connection", new=AsyncMock(return_value=client)
+    ):
+        assert not await BM2Protocol().async_validate_active(device)
+    client.stop_notify.assert_awaited_once()
+    client.disconnect.assert_awaited_once()
+
+
 STALE_LOG_PACKET = {38226: bytes.fromhex("bc966e90d5ab3778f7e3ae99d8a9")}
 CURRENT_LOG_PACKET = {11628: bytes.fromhex("b1e65b448775c27f1b9e78c09d53")}
 CURRENT_LOG_RAW = bytes.fromhex("0201060302f0ff11ff6c2db1e65b448775c27f1b9e78c09d53")
