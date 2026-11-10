@@ -6,7 +6,9 @@ to be supported later.
 
 It decodes legacy percentage advertisements and encrypted enhanced voltage and
 percentage advertisements, validates the BM2 notification characteristic, and
-tries an active GATT reading before falling back to cached advertisement data.
+reads the BM2 over an active GATT connection. Nothing is cached: each
+advertisement returns its own reading, and each active read returns a fresh
+GATT reading or raises.
 
 ## Installation
 
@@ -20,23 +22,48 @@ python -m pip install bmx-ble
 from bmx_ble import BM2Protocol
 
 monitor = BM2Protocol()
-monitor.process_advertisement(
+advert = monitor.process_advertisement(
     service_info.manufacturer_data, raw=service_info.raw
-)
-reading = await monitor.async_poll(ble_device)  # None allows passive fallback.
-print(reading.voltage, reading.percentage, reading.generation)
+)  # BM2Reading for this advertisement, or None.
+reading = await monitor.async_poll(ble_device)
+print(reading.voltage, reading.percentage, reading.status)
 ```
 
-Supply a `bleak.backends.device.BLEDevice` for active reading. Connection
-failures propagate when no usable advertisement has been cached.
+`async_poll()` needs a connectable `bleak.backends.device.BLEDevice`. Connection
+failures and notification timeouts propagate. While it runs,
+`monitor.ignore_advertisement` is true, so a scheduler can decline to queue
+another read for advertisements received during the connection.
 
 Pass the current raw Bluetooth advertisement when available: scanner manufacturer
 data may contain records accumulated across many packets. Raw fields are parsed
 by their Bluetooth AD lengths, and only current manufacturer records are decoded.
-Without raw bytes, dictionaries with multiple records are ambiguous and are not
-used as passive telemetry. Cached passive readings expire after 180 seconds.
-A fresh legacy percentage packet does not renew a historical voltage reading;
-the previously detected Enhanced generation remains known.
+Without raw bytes, dictionaries with multiple records are ambiguous: Enhanced
+records are ignored, and only the Legacy record (whose manufacturer ID never
+changes, so its value is current) is decoded.
+
+`monitor.bm2_generation` records the most capable advertisement format seen:
+it moves from `UNKNOWN` to `LEGACY` or `ENHANCED` and never downgrades, so a
+legacy packet from an Enhanced BM2 still returns only its own percentage.
+
+## Deciding when to connect
+
+Legacy advertisements carry percentage only; Enhanced advertisements carry
+voltage and percentage. Neither carries status. With a chosen chemistry,
+percentage and status are derived from voltage. `needs_active_read()` returns
+whether a GATT connection is needed for data the advertisements cannot give:
+
+```python
+from bmx_ble.battery import needs_active_read
+
+if needs_active_read(monitor.bm2_generation, profile):
+    reading = await monitor.async_poll(ble_device)
+```
+
+| Generation | Automatic chemistry | Chosen chemistry |
+| --- | --- | --- |
+| Unknown | connect | connect |
+| Legacy | connect (voltage, status) | connect (voltage) |
+| Enhanced | connect (status) | never connect |
 
 ## Development
 

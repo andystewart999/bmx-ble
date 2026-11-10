@@ -7,7 +7,7 @@ from itertools import pairwise
 from math import isfinite
 from types import MappingProxyType
 
-from .protocol import BM2Reading
+from .protocol import BM2Generation, BM2Reading
 
 
 class BatteryConfigurationError(ValueError):
@@ -228,3 +228,13 @@ def interpret_reading(reading: BM2Reading, profile: BatteryProfile) -> BatteryRe
         status=_STATUS_NAMES.get(status, "unknown") if status is not None else None,
         charging=status in (4, 8) if status is not None else None,
     )
+
+
+def needs_active_read(generation: BM2Generation, profile: BatteryProfile) -> bool:
+    """Return whether a GATT connection is needed for data adverts cannot give.
+
+    Only an Enhanced BM2 with a chosen chemistry is fully served by its
+    advertisements: they carry voltage, from which percentage and status are
+    derived.  Every other combination lacks voltage or status.
+    """
+    return generation is not BM2Generation.ENHANCED or not profile.volts_to_percent

@@ -12,10 +12,11 @@ from bmx_ble.battery import (
     custom_battery_profile,
     get_battery_profile,
     interpret_reading,
+    needs_active_read,
     percentage_from_voltage,
     status_from_voltage,
 )
-from bmx_ble.protocol import BM2Reading
+from bmx_ble.protocol import BM2Generation, BM2Reading
 
 CUSTOM = {
     "battery_chemistry": "Test chemistry",
@@ -238,3 +239,30 @@ def test_display_label_does_not_change_lookup(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(battery_module, "BATTERY_PROFILES", {Battery.leadacid: profile})
     assert get_battery_profile("leadacid") is profile
     assert get_battery_profile(Battery.leadacid) is profile
+
+
+@pytest.mark.parametrize(
+    ("generation", "chemistry", "expected"),
+    [
+        pytest.param(BM2Generation.UNKNOWN, Battery.automatic, True, id="unknown-auto"),
+        pytest.param(BM2Generation.UNKNOWN, Battery.agm, True, id="unknown-chosen"),
+        pytest.param(BM2Generation.LEGACY, Battery.automatic, True, id="legacy-auto"),
+        pytest.param(BM2Generation.LEGACY, Battery.agm, True, id="legacy-chosen"),
+        pytest.param(
+            BM2Generation.ENHANCED, Battery.automatic, True, id="enhanced-auto"
+        ),
+        pytest.param(BM2Generation.ENHANCED, Battery.agm, False, id="enhanced-chosen"),
+    ],
+)
+def test_needs_active_read(
+    generation: BM2Generation, chemistry: Battery, expected: bool
+) -> None:
+    """Only Enhanced with a voltage curve is fully served by advertisements."""
+    assert needs_active_read(generation, get_battery_profile(chemistry)) is expected
+
+
+def test_needs_active_read_custom_profile() -> None:
+    """A custom curve counts as a chosen chemistry."""
+    profile = custom_battery_profile(**CUSTOM)
+    assert not needs_active_read(BM2Generation.ENHANCED, profile)
+    assert needs_active_read(BM2Generation.LEGACY, profile)

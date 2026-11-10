@@ -6,7 +6,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from time import monotonic
 
 from bleak import BleakError, BLEDevice
 from bleak_retry_connector import (
@@ -18,7 +17,6 @@ from Crypto.Cipher import AES
 
 _LOGGER = logging.getLogger(__name__)
 GATT_TIMEOUT = 20
-ADVERTISEMENT_MAX_AGE = 180
 BM2_CHARACTERISTIC = "{0000fff4-0000-1000-8000-00805f9b34fb}"
 VALID_BATTERY_STATUSES = frozenset({0, 1, 2, 4, 8})
 
@@ -78,8 +76,6 @@ class BM2Protocol:
         """Create an independent BM2 reader with no cached telemetry."""
         self._gattdata: bytes | None = None
         self._ignore_advertisement = False
-        self._advertisement_reading: BM2Reading | None = None
-        self._advertisement_time: float | None = None
         self._bm2_generation = BM2Generation.UNKNOWN
 
     @property
@@ -89,31 +85,41 @@ class BM2Protocol:
 
     @property
     def ignore_advertisement(self) -> bool:
-        """Return whether an active notification read is in progress."""
+        """Return whether async_poll() is connected or connecting.
+
+        A debounced poll scheduler that is asked to poll while one is running
+        queues another call for when it finishes; this lets it decline.
+        """
         return self._ignore_advertisement
 
     def process_advertisement(
         self, manufacturer_data: dict[int, bytes], *, raw: bytes | None = None
-    ) -> None:
-        """Cache telemetry from the current packet, not merged scanner history."""
+    ) -> BM2Reading | None:
+        """Decode the current packet, not merged scanner history.
+
+        Returns the reading carried by this advertisement, or None when it
+        holds no BM2 telemetry.  Nothing is cached between advertisements.
+        """
         if raw is not None:
             manufacturer_data = self._raw_manufacturer_data(raw)
         elif len(manufacturer_data) > 1:
-            # Without raw bytes the merged records have no reliable chronology.
-            self._advertisement_reading = None
-            self._advertisement_time = None
-            return
+            # Without raw bytes the Enhanced records can't be told apart from
+            # old ones.  The Legacy record always uses the same ID, so it is
+            # current.
+            manufacturer_data = {
+                manufacturer_id: payload
+                for manufacturer_id, payload in manufacturer_data.items()
+                if manufacturer_id == BM2_LEGACY_MANUFACTURER_ID
+            }
 
         reading = self._decode_advertisement(manufacturer_data)
         if reading is None:
-            return
+            return None
         if reading.generation is BM2Generation.ENHANCED:
             self._bm2_generation = BM2Generation.ENHANCED
         elif self._bm2_generation is BM2Generation.UNKNOWN:
             self._bm2_generation = reading.generation
-        # A fresh percentage-only packet must not refresh an older voltage.
-        self._advertisement_reading = reading
-        self._advertisement_time = monotonic()
+        return reading
 
     @staticmethod
     def _raw_manufacturer_data(raw: bytes) -> dict[int, bytes]:
@@ -148,7 +154,6 @@ class BM2Protocol:
         cipher = AES.new(BM2_AES_KEY, AES.MODE_CBC, BM2_AES_IV)
         return cipher.decrypt(data)
 
-    # ADVERTISEMENT FALLBACK:
     def _decode_advertisement(
         self,
         manufacturer_data: dict[int, bytes],
@@ -247,7 +252,6 @@ class BM2Protocol:
     ) -> BM2Reading:
         """Read and decode the active BM2 GATT notification."""
         self._gattdata = None
-        self._ignore_advertisement = True
 
         try:
             await client.start_notify(
@@ -261,18 +265,9 @@ class BM2Protocol:
                 ticks += 1
 
         finally:
-            # Always attempt to stop notification handling and, importantly,
-            # always clear the ignore flag even if Bleak throws.
-            try:
-                await client.stop_notify(BM2_CHARACTERISTIC)
-            finally:
-                self._ignore_advertisement = False
+            await client.stop_notify(BM2_CHARACTERISTIC)
 
         if self._gattdata is None:
-            # CHANGED:
-            # The previous implementation silently returned here.  Raising
-            # makes a no-notification timeout a genuine failed active read,
-            # allowing async_poll() to use the cached advertisement.
             raise BleakError(
                 f"Timed out waiting for BM2 GATT notification from {client.address}"
             )
@@ -363,64 +358,28 @@ class BM2Protocol:
             if client is not None:
                 await client.disconnect()
 
-    async def async_poll(
-        self,
-        ble_device: BLEDevice | None,
-    ) -> BM2Reading:
-        """Prefer an active GATT read and fall back to advertisement data.
+    async def async_poll(self, ble_device: BLEDevice) -> BM2Reading:
+        """Connect to the BM2 and return its GATT reading.
 
-        Passing ble_device=None means Home Assistant heard the device through a
-        passive scanner/proxy but currently has no connectable Bluetooth path.
+        Connection errors and notification timeouts propagate to the caller.
         """
         client: BleakClientWithServiceCache | None = None
+        self._ignore_advertisement = True
 
         try:
-            if ble_device is None:
-                raise BleakError("No connectable Bluetooth path is currently available")
-
-            _LOGGER.debug(
-                "Connecting to Bluetooth device %s",
-                ble_device.address,
-            )
-
+            _LOGGER.debug("Connecting to Bluetooth device %s", ble_device.address)
             client = await establish_connection(
                 BleakClientWithServiceCache,
                 ble_device,
                 ble_device.address,
             )
-
-            _LOGGER.debug(
-                "Connected to BM2 device %s",
-                ble_device.address,
-            )
-
-            reading = await self._get_payload(client)
-            return reading
-
-        except Exception as ex:
-            # ADVERTISEMENT FALLBACK:
-            # Active connection/read failed.  If the immediately preceding
-            # advertisement contained usable telemetry, publish it instead.
-            if (
-                self._advertisement_reading is not None
-                and self._advertisement_time is not None
-                and monotonic() - self._advertisement_time <= ADVERTISEMENT_MAX_AGE
-            ):
-                address = ble_device.address if ble_device is not None else "unknown"
-                _LOGGER.debug(
-                    "Active BM2 read failed for %s (%s); using cached "
-                    "advertisement data",
-                    address,
-                    ex,
-                )
-                return self._advertisement_reading
-
-            # No usable passive fallback exists, so preserve the failure.
-            raise
+            _LOGGER.debug("Connected to BM2 device %s", ble_device.address)
+            return await self._get_payload(client)
 
         finally:
-            if client is not None:
-                try:
+            try:
+                if client is not None:
                     await client.disconnect()
-                finally:
                     _LOGGER.debug("Disconnected from active Bluetooth client")
+            finally:
+                self._ignore_advertisement = False

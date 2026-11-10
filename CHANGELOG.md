@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Breaking: remove the advertisement reading cache and the passive fallback in `async_poll()`.
+- Breaking: `async_poll()` requires a `BLEDevice` and returns the GATT reading or raises.
+- `process_advertisement()` returns the reading carried by that advertisement, or `None`.
+- Add `bmx_ble.battery.needs_active_read()` to decide when a GATT connection is needed.
+- `ignore_advertisement` now covers the whole of `async_poll()`, including connection setup.
+- Without raw bytes, decode the Legacy record from merged manufacturer data instead of returning nothing.
+
 ## 0.3.4
 
 - Reject malformed FFF4 notifications during active validation instead of raising `ValueError`.

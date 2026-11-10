@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from bleak import BleakError
 from Crypto.Cipher import AES
 
 from bmx_ble import BM2Generation, BM2Protocol
@@ -34,30 +35,39 @@ LEGACY_PACKET = {
 def test_legacy_packet() -> None:
     """A recognised legacy frame provides only percentage."""
     monitor = BM2Protocol()
-    monitor.process_advertisement(LEGACY_PACKET)
+    reading = monitor.process_advertisement(LEGACY_PACKET)
     assert monitor.bm2_generation is BM2Generation.LEGACY
-    reading = monitor._advertisement_reading
+    assert reading is not None
+    assert reading.voltage is None
+    assert reading.percentage == 48
+    assert reading.generation is BM2Generation.LEGACY
+
+
+def test_enhanced_packet() -> None:
+    """A recognised enhanced frame provides voltage and percentage."""
+    monitor = BM2Protocol()
+    reading = monitor.process_advertisement(_enhanced_packet())
+    assert monitor.bm2_generation is BM2Generation.ENHANCED
+    assert reading is not None
+    assert (reading.voltage, reading.percentage, reading.status) == (12.5, 75, None)
+
+
+def test_enhanced_then_legacy_preserves_generation() -> None:
+    """A legacy packet returns only its own percentage and never downgrades."""
+    monitor = BM2Protocol()
+    monitor.process_advertisement(_enhanced_packet())
+    reading = monitor.process_advertisement(LEGACY_PACKET)
+    assert monitor.bm2_generation is BM2Generation.ENHANCED
     assert reading is not None
     assert reading.voltage is None
     assert reading.percentage == 48
 
 
-def test_enhanced_then_legacy_preserves_generation() -> None:
-    """A percentage-only packet must not refresh a historical voltage."""
-    monitor = BM2Protocol()
-    monitor.process_advertisement(_enhanced_packet())
-    monitor.process_advertisement(LEGACY_PACKET)
-    assert monitor.bm2_generation is BM2Generation.ENHANCED
-    assert monitor._advertisement_reading is not None
-    assert monitor._advertisement_reading.voltage is None
-    assert monitor._advertisement_reading.percentage == 48
-
-
 def test_invalid_packet_is_ignored() -> None:
     """Plausible frame shape alone must not identify a BM2."""
     monitor = BM2Protocol()
-    monitor.process_advertisement(_enhanced_packet(voltage_cents=500))
-    monitor.process_advertisement({0x004C: b"\x02\x15" + bytes(21)})
+    assert monitor.process_advertisement(_enhanced_packet(voltage_cents=500)) is None
+    assert monitor.process_advertisement({0x004C: b"\x02\x15" + bytes(21)}) is None
     assert monitor.bm2_generation is BM2Generation.UNKNOWN
 
 
@@ -66,17 +76,6 @@ def test_gatt_payload() -> None:
     plain = bytes.fromhex("004e2464" + "00" * 12)
     reading = BM2Protocol()._decode_gatt(_encrypt(plain))
     assert (reading.voltage, reading.percentage, reading.status) == (12.5, 100, 4)
-
-
-@pytest.mark.asyncio
-async def test_passive_fallback_and_missing_data() -> None:
-    """A cached packet works without a connectable path; no packet fails."""
-    monitor = BM2Protocol()
-    with pytest.raises(Exception, match="No connectable Bluetooth path"):
-        await monitor.async_poll(None)
-    monitor.process_advertisement(LEGACY_PACKET)
-    reading = await monitor.async_poll(None)
-    assert reading.percentage == 48
 
 
 @pytest.mark.asyncio
@@ -103,6 +102,55 @@ async def test_active_validation_and_poll() -> None:
     assert reading.voltage == 12.5
     assert reading.status == 4
     assert client.disconnect.await_count == 2
+
+
+def _connect_observing_flag(monitor: BM2Protocol, seen: list[bool]) -> AsyncMock:
+    async def _connect(*_args: object) -> object:
+        seen.append(monitor.ignore_advertisement)
+        raise BleakError("connection failed")
+
+    return AsyncMock(side_effect=_connect)
+
+
+@pytest.mark.asyncio
+async def test_poll_failure_raises_without_advertisement_fallback() -> None:
+    """A failed read propagates even after a usable advertisement."""
+    monitor = BM2Protocol()
+    assert monitor.process_advertisement(_enhanced_packet()) is not None
+    seen: list[bool] = []
+    with (
+        patch(
+            "bmx_ble.protocol.establish_connection",
+            new=_connect_observing_flag(monitor, seen),
+        ),
+        pytest.raises(BleakError, match="connection failed"),
+    ):
+        await monitor.async_poll(SimpleNamespace(address="AA:BB:CC:DD:EE:FF"))
+    # The flag covers connection setup and is always cleared.
+    assert seen == [True]
+    assert not monitor.ignore_advertisement
+
+
+@pytest.mark.asyncio
+async def test_poll_notification_timeout_raises() -> None:
+    """No notification within the GATT timeout is a failed read."""
+    client = SimpleNamespace(
+        address="AA:BB:CC:DD:EE:FF",
+        start_notify=AsyncMock(),
+        stop_notify=AsyncMock(),
+        disconnect=AsyncMock(),
+    )
+    monitor = BM2Protocol()
+    with (
+        patch(
+            "bmx_ble.protocol.establish_connection", new=AsyncMock(return_value=client)
+        ),
+        patch("bmx_ble.protocol.GATT_TIMEOUT", 0),
+        pytest.raises(BleakError, match="Timed out"),
+    ):
+        await monitor.async_poll(SimpleNamespace(address=client.address))
+    client.disconnect.assert_awaited_once()
+    assert not monitor.ignore_advertisement
 
 
 @pytest.mark.asyncio
@@ -167,27 +215,31 @@ def test_current_raw_overrides_merged_history() -> None:
     """The real capture contains 12.88 V despite an older 10.43 V record."""
     monitor = BM2Protocol()
     merged = STALE_LOG_PACKET | CURRENT_LOG_PACKET
-    monitor.process_advertisement(merged, raw=CURRENT_LOG_RAW + b"\x02\x0a\x00")
-    assert monitor._advertisement_reading is not None
-    assert monitor._advertisement_reading.voltage == 12.88
-    assert monitor._advertisement_reading.percentage == 100
-    monitor.process_advertisement(merged, raw=_raw_packet(STALE_LOG_PACKET))
-    assert monitor._advertisement_reading.voltage == 10.43
-    monitor.process_advertisement(merged, raw=CURRENT_LOG_RAW)
-    assert monitor._advertisement_reading.voltage == 12.88
+    reading = monitor.process_advertisement(
+        merged, raw=CURRENT_LOG_RAW + b"\x02\x0a\x00"
+    )
+    assert reading is not None
+    assert reading.voltage == 12.88
+    assert reading.percentage == 100
+    reading = monitor.process_advertisement(merged, raw=_raw_packet(STALE_LOG_PACKET))
+    assert reading is not None
+    assert reading.voltage == 10.43
+    reading = monitor.process_advertisement(merged, raw=CURRENT_LOG_RAW)
+    assert reading is not None
+    assert reading.voltage == 12.88
 
 
 def test_raw_legacy_does_not_select_historical_voltage() -> None:
     """A current legacy packet is decoded independently of encrypted history."""
     monitor = BM2Protocol()
     monitor.process_advertisement(CURRENT_LOG_PACKET, raw=CURRENT_LOG_RAW)
-    monitor.process_advertisement(
+    reading = monitor.process_advertisement(
         CURRENT_LOG_PACKET | LEGACY_PACKET, raw=_raw_packet(LEGACY_PACKET)
     )
     assert monitor.bm2_generation is BM2Generation.ENHANCED
-    assert monitor._advertisement_reading is not None
-    assert monitor._advertisement_reading.voltage is None
-    assert monitor._advertisement_reading.percentage == 48
+    assert reading is not None
+    assert reading.voltage is None
+    assert reading.percentage == 48
 
 
 @pytest.mark.parametrize(
@@ -204,29 +256,24 @@ def test_raw_legacy_does_not_select_historical_voltage() -> None:
 def test_malformed_or_unrelated_raw_does_not_use_history(raw: bytes) -> None:
     """Raw data is authoritative, including when it has no usable telemetry."""
     monitor = BM2Protocol()
-    monitor.process_advertisement(CURRENT_LOG_PACKET, raw=raw)
-    assert monitor._advertisement_reading is None
+    assert monitor.process_advertisement(CURRENT_LOG_PACKET, raw=raw) is None
+    assert monitor.bm2_generation is BM2Generation.UNKNOWN
 
 
-@pytest.mark.asyncio
-async def test_ambiguous_history_is_not_passive_telemetry() -> None:
+def test_ambiguous_history_is_not_telemetry() -> None:
     """Missing raw bytes cannot establish which historical record is current."""
     monitor = BM2Protocol()
-    monitor.process_advertisement(CURRENT_LOG_PACKET)
-    monitor.process_advertisement(STALE_LOG_PACKET | CURRENT_LOG_PACKET)
-    with pytest.raises(Exception, match="No connectable Bluetooth path"):
-        await monitor.async_poll(None)
+    assert monitor.process_advertisement(CURRENT_LOG_PACKET) is not None
+    assert monitor.process_advertisement(STALE_LOG_PACKET | CURRENT_LOG_PACKET) is None
+    assert monitor.bm2_generation is BM2Generation.ENHANCED
 
 
-@pytest.mark.asyncio
-async def test_passive_cache_expires() -> None:
-    """Unrelated broadcasts must not renew cached telemetry freshness."""
+def test_legacy_record_is_trusted_in_merged_history() -> None:
+    """Without raw bytes, the fixed-ID legacy record is still current."""
     monitor = BM2Protocol()
-    with patch("bmx_ble.protocol.monotonic", return_value=100):
-        monitor.process_advertisement(CURRENT_LOG_PACKET, raw=CURRENT_LOG_RAW)
-    with patch("bmx_ble.protocol.monotonic", return_value=280):
-        assert (await monitor.async_poll(None)).voltage == 12.88
-    with patch("bmx_ble.protocol.monotonic", return_value=281):
-        monitor.process_advertisement(CURRENT_LOG_PACKET, raw=b"\x02\x01\x06")
-        with pytest.raises(Exception, match="No connectable Bluetooth path"):
-            await monitor.async_poll(None)
+    reading = monitor.process_advertisement(
+        STALE_LOG_PACKET | CURRENT_LOG_PACKET | LEGACY_PACKET
+    )
+    assert reading is not None
+    assert reading.voltage is None
+    assert reading.percentage == 48
