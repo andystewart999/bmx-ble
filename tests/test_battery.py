@@ -9,6 +9,7 @@ from bmx_ble.battery import (
     BATTERY_PROFILES,
     Battery,
     BatteryConfigurationError,
+    BatteryStatus,
     custom_battery_profile,
     get_battery_profile,
     interpret_reading,
@@ -125,17 +126,17 @@ def test_profiles_are_immutable() -> None:
 @pytest.mark.parametrize(
     ("code", "status", "charging"),
     [
-        (0, "critical", False),
-        (1, "low", False),
-        (2, "normal", False),
-        (4, "charging", True),
-        (8, "floating", True),
-        (99, "unknown", False),
+        (0, BatteryStatus.critical, False),
+        (1, BatteryStatus.low, False),
+        (2, BatteryStatus.normal, False),
+        (4, BatteryStatus.charging, True),
+        (8, BatteryStatus.floating, True),
+        (99, BatteryStatus.unknown, False),
         (None, None, None),
     ],
 )
 def test_automatic_reading(
-    code: int | None, status: str | None, charging: bool | None
+    code: int | None, status: BatteryStatus | None, charging: bool | None
 ) -> None:
     """Automatic mode retains the monitor percentage and recognizes known codes."""
     raw = BM2Reading(12.5, 67, code, "active")
@@ -143,7 +144,7 @@ def test_automatic_reading(
     assert interpreted.battery_chemistry == "Automatic"
     assert interpreted.voltage == 12.5
     assert interpreted.percentage == 67
-    assert interpreted.status == status
+    assert interpreted.status is status
     assert interpreted.charging is charging
     assert raw.percentage == 67
     assert raw.status == code
@@ -266,3 +267,20 @@ def test_needs_active_read_custom_profile() -> None:
     profile = custom_battery_profile(**CUSTOM)
     assert not needs_active_read(BM2Generation.ENHANCED, profile)
     assert needs_active_read(BM2Generation.LEGACY, profile)
+
+
+def test_battery_status_compares_as_string() -> None:
+    """Statuses stay usable as plain strings by existing consumers."""
+    result = interpret_reading(
+        BM2Reading(12.5, 67, 4, "active"), get_battery_profile(Battery.automatic)
+    )
+    assert result.status == "charging"
+    assert isinstance(result.status, str)
+    assert [status.value for status in BatteryStatus] == [
+        "critical",
+        "low",
+        "normal",
+        "charging",
+        "floating",
+        "unknown",
+    ]

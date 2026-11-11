@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Add `bmx_ble.battery.BatteryStatus`, a `StrEnum` of the interpreted statuses. `BatteryReading.status` is now a `BatteryStatus` (or `None`); members still compare equal to the previous string values.
+
 ## 0.4.0
 
 - Breaking: remove the advertisement reading cache and the passive fallback in `async_poll()`.

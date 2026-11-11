@@ -108,8 +108,12 @@ such as `"Lead-acid"` are not accepted as identifiers. Custom batteries use
 
 Profiles and their curves are immutable. `Automatic (via BM2)` preserves the
 battery monitor's reported percentage and status instead of applying a voltage curve.
-Unknown status codes produce `"unknown"` and do not imply charging. Status codes
-4 (charging) and 8 (floating) set the interpreted charging flag.
+Statuses are `BatteryStatus` members: `critical`, `low`, `normal`, `charging`,
+`floating` and `unknown`. `BatteryStatus` is a `StrEnum`, so each member also
+compares equal to its string value. `unknown` means the monitor reported a
+status code that isn't recognised; it does not imply charging. A status of
+`None` means the reading carried no status at all. Status codes 4 (charging)
+and 8 (floating) set the interpreted charging flag.
 
 Use `custom_battery_profile()` for a custom curve:
 

@@ -27,6 +27,21 @@ class Battery(StrEnum):
     custom = "custom"
 
 
+class BatteryStatus(StrEnum):
+    """Interpreted battery status.
+
+    unknown means the monitor reported a status code that isn't recognised,
+    which is different from a reading that carries no status at all (None).
+    """
+
+    critical = "critical"
+    low = "low"
+    normal = "normal"
+    charging = "charging"
+    floating = "floating"
+    unknown = "unknown"
+
+
 @dataclass(frozen=True)
 class BatteryProfile:
     """Immutable battery curve and voltage thresholds."""
@@ -51,7 +66,7 @@ class BatteryReading:
     battery_chemistry: str
     voltage: float | None
     percentage: int | None
-    status: str | None
+    status: BatteryStatus | None
     charging: bool | None
 
 
@@ -115,13 +130,13 @@ BATTERY_PROFILES: Mapping[Battery, BatteryProfile] = MappingProxyType(
     }
 )
 
-_STATUS_NAMES: Mapping[int, str] = MappingProxyType(
+_STATUS_NAMES: Mapping[int, BatteryStatus] = MappingProxyType(
     {
-        0: "critical",
-        1: "low",
-        2: "normal",
-        4: "charging",
-        8: "floating",
+        0: BatteryStatus.critical,
+        1: BatteryStatus.low,
+        2: BatteryStatus.normal,
+        4: BatteryStatus.charging,
+        8: BatteryStatus.floating,
     }
 )
 
@@ -225,7 +240,11 @@ def interpret_reading(reading: BM2Reading, profile: BatteryProfile) -> BatteryRe
         battery_chemistry=profile.battery_chemistry,
         voltage=reading.voltage,
         percentage=percentage,
-        status=_STATUS_NAMES.get(status, "unknown") if status is not None else None,
+        status=(
+            _STATUS_NAMES.get(status, BatteryStatus.unknown)
+            if status is not None
+            else None
+        ),
         charging=status in (4, 8) if status is not None else None,
     )
 
